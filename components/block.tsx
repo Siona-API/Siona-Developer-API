@@ -1,63 +1,80 @@
-import type {
-  Attachment,
-  ChatRequestOptions,
-  CreateMessage,
-  Message,
-} from 'ai';
-import { formatDistance } from 'date-fns';
-import { AnimatePresence, motion } from 'framer-motion';
-import {
-  type Dispatch,
-  memo,
-  type SetStateAction,
-  useCallback,
-  useEffect,
-  useState,
-} from 'react';
-import useSWR, { useSWRConfig } from 'swr';
-import { useDebounceCallback, useWindowSize } from 'usehooks-ts';
+import { Connection, PublicKey, TransactionInstruction } from '@solana/web3.js';
+import { TokenListProvider, TokenInfo } from '@solana/spl-token-registry';
+import { Wallet } from '@project-serum/anchor';
+import { Jupiter } from '@jup-ag/core';
+import { Queue } from '@datastructures-js/queue';
 
-import type { Document, Suggestion, Vote } from '@/lib/db/schema';
-import { cn, fetcher } from '@/lib/utils';
-
-import { DiffView } from './diffview';
-import { DocumentSkeleton } from './document-skeleton';
-import { Editor } from './editor';
-import { MultimodalInput } from './multimodal-input';
-import { Toolbar } from './toolbar';
-import { VersionFooter } from './version-footer';
-import { BlockActions } from './block-actions';
-import { BlockCloseButton } from './block-close-button';
-import { BlockMessages } from './block-messages';
-import { CodeEditor } from './code-editor';
-import { Console } from './console';
-import { useSidebar } from './ui/sidebar';
-import { useBlock } from '@/hooks/use-block';
-import equal from 'fast-deep-equal';
-
-export type BlockKind = 'text' | 'code';
-
-export interface UIBlock {
-  title: string;
-  documentId: string;
-  kind: BlockKind;
-  content: string;
-  isVisible: boolean;
-  status: 'streaming' | 'idle';
-  boundingBox: {
-    top: number;
-    left: number;
-    width: number;
-    height: number;
+// Enhanced interfaces for blockchain functionality
+export interface BlockchainState {
+  status: 'connected' | 'disconnecting' | 'connecting' | 'disconnected';
+  network: 'mainnet-beta' | 'devnet' | 'testnet';
+  latestBlock: number;
+  currentSlot: number;
+  averageBlockTime: number;
+  nodeHealth: {
+    status: 'healthy' | 'degraded' | 'unhealthy';
+    latency: number;
+    lastUpdated: Date;
   };
 }
 
-export interface ConsoleOutput {
-  id: string;
-  status: 'in_progress' | 'completed' | 'failed';
-  content: string | null;
+export interface TokenMetrics {
+  address: string;
+  price: number;
+  change1h: number;
+  change24h: number;
+  change7d: number;
+  volume24h: number;
+  marketCap: number;
+  fullyDilutedValuation: number;
+  liquidityUSD: number;
+  socialMetrics: {
+    twitterFollowers: number;
+    telegramMembers: number;
+    discordMembers: number;
+    githubStats: {
+      stars: number;
+      forks: number;
+      lastCommit: Date;
+    };
+  };
 }
 
+export interface MEVProtection {
+  enabled: boolean;
+  strategy: 'bundle' | 'private-tx' | 'time-delay';
+  maxPriorityFee: number;
+  bundleSize: number;
+  timeDelay: number;
+}
+
+export interface MarketAnalysis {
+  sentiment: 'bullish' | 'bearish' | 'neutral';
+  confidence: number;
+  trends: Array<{
+    type: string;
+    strength: number;
+    duration: string;
+  }>;
+  predictions: Array<{
+    timeframe: string;
+    prediction: number;
+    confidence: number;
+  }>;
+}
+
+export interface EnhancedConsoleOutput extends ConsoleOutput {
+  transactionHash?: string;
+  tokenData?: TokenMetrics;
+  marketAnalysis?: MarketAnalysis;
+  simulationResult?: {
+    success: boolean;
+    gasUsed: number;
+    logs: string[];
+  };
+}
+
+// Enhanced Block component with blockchain features
 function PureBlock({
   chatId,
   input,
@@ -74,491 +91,207 @@ function PureBlock({
   votes,
   isReadonly,
 }: {
-  chatId: string;
-  input: string;
-  setInput: (input: string) => void;
-  isLoading: boolean;
-  stop: () => void;
-  attachments: Array<Attachment>;
-  setAttachments: Dispatch<SetStateAction<Array<Attachment>>>;
-  messages: Array<Message>;
-  setMessages: Dispatch<SetStateAction<Array<Message>>>;
-  votes: Array<Vote> | undefined;
-  append: (
-    message: Message | CreateMessage,
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
-  handleSubmit: (
-    event?: {
-      preventDefault?: () => void;
-    },
-    chatRequestOptions?: ChatRequestOptions,
-  ) => void;
-  reload: (
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
-  isReadonly: boolean;
+  // Existing props
 }) {
-  const { block, setBlock } = useBlock();
+  // Blockchain State Management
+  const [blockchainState, setBlockchainState] = useState<BlockchainState>({
+    status: 'connecting',
+    network: 'mainnet-beta',
+    latestBlock: 0,
+    currentSlot: 0,
+    averageBlockTime: 0,
+    nodeHealth: {
+      status: 'healthy',
+      latency: 0,
+      lastUpdated: new Date()
+    }
+  });
 
-  const {
-    data: documents,
-    isLoading: isDocumentsFetching,
-    mutate: mutateDocuments,
-  } = useSWR<Array<Document>>(
-    block.documentId !== 'init' && block.status !== 'streaming'
-      ? `/api/document?id=${block.documentId}`
-      : null,
-    fetcher,
-  );
+  // Token and Market Data Management
+  const [tokenMetrics, setTokenMetrics] = useState<Map<string, TokenMetrics>>(new Map());
+  const [marketAnalysis, setMarketAnalysis] = useState<MarketAnalysis | null>(null);
+  const [transactionQueue] = useState<Queue<TransactionInstruction>>(new Queue());
 
-  const { data: suggestions } = useSWR<Array<Suggestion>>(
-    documents && block && block.status !== 'streaming'
-      ? `/api/suggestions?documentId=${block.documentId}`
-      : null,
-    fetcher,
-    {
-      dedupingInterval: 5000,
-    },
-  );
+  // MEV Protection Configuration
+  const [mevProtection, setMevProtection] = useState<MEVProtection>({
+    enabled: true,
+    strategy: 'bundle',
+    maxPriorityFee: 1000,
+    bundleSize: 3,
+    timeDelay: 2000
+  });
 
-  const [mode, setMode] = useState<'edit' | 'diff'>('edit');
-  const [document, setDocument] = useState<Document | null>(null);
-  const [currentVersionIndex, setCurrentVersionIndex] = useState(-1);
-  const [consoleOutputs, setConsoleOutputs] = useState<Array<ConsoleOutput>>(
-    [],
-  );
+  // RPC Node Management
+  const rpcManager = useMemo(() => {
+    return new RPCManager({
+      endpoints: [
+        'https://sion-a-rpc1.fun',
+        'https://sion-a-rpc2.fun',
+        'https://sion-a-rpc3.fun'
+      ],
+      healthCheckInterval: 30000,
+      retryAttempts: 3
+    });
+  }, []);
 
-  const { open: isSidebarOpen } = useSidebar();
+  // Jupiter Integration
+  const jupiterManager = useMemo(() => {
+    return new JupiterManager({
+      connection: rpcManager.getConnection(),
+      slippageBps: 50,
+      enableSmartRouting: true
+    });
+  }, [rpcManager]);
 
+  // WebSocket Integration for Real-time Updates
   useEffect(() => {
-    if (documents && documents.length > 0) {
-      const mostRecentDocument = documents.at(-1);
-
-      if (mostRecentDocument) {
-        setDocument(mostRecentDocument);
-        setCurrentVersionIndex(documents.length - 1);
-        setBlock((currentBlock) => ({
-          ...currentBlock,
-          content: mostRecentDocument.content ?? '',
+    const priceSocket = new WebSocket('wss://real-time.sion-a.fun');
+    const marketSocket = new WebSocket('wss://market-analytics.sion-a.fun');
+    
+    priceSocket.onmessage = (event) => {
+      const { tokenMetrics, marketUpdate } = JSON.parse(event.data);
+      setTokenMetrics(current => new Map(current.set(tokenMetrics.address, tokenMetrics)));
+      
+      if (marketUpdate) {
+        setMarketAnalysis(prevAnalysis => ({
+          ...prevAnalysis,
+          ...marketUpdate
         }));
       }
+    };
+
+    return () => {
+      priceSocket.close();
+      marketSocket.close();
+    };
+  }, []);
+
+  // Transaction Management and MEV Protection
+  const handleTransaction = useCallback(async (transaction: TransactionInstruction) => {
+    if (mevProtection.enabled) {
+      const protectedTx = await applyMEVProtection(transaction, mevProtection);
+      const simulationResult = await simulateTransaction(protectedTx);
+      
+      if (simulationResult.success) {
+        transactionQueue.enqueue(protectedTx);
+        processTransactionQueue();
+      } else {
+        handleConsoleOutput({
+          id: Date.now().toString(),
+          status: 'failed',
+          content: 'Transaction simulation failed',
+          simulationResult
+        });
+      }
     }
-  }, [documents, setBlock]);
+  }, [mevProtection, transactionQueue]);
 
-  useEffect(() => {
-    mutateDocuments();
-  }, [block.status, mutateDocuments]);
+  // Market Analysis Integration
+  const analyzeMarket = useCallback(async () => {
+    try {
+      const analysis = await fetchMarketAnalysis();
+      setMarketAnalysis(analysis);
+      
+      if (analysis.sentiment === 'bullish' && analysis.confidence > 0.8) {
+        handleConsoleOutput({
+          id: Date.now().toString(),
+          status: 'completed',
+          content: 'High confidence bullish signal detected',
+          marketAnalysis: analysis
+        });
+      }
+    } catch (error) {
+      console.error('Market analysis failed:', error);
+    }
+  }, []);
 
-  const { mutate } = useSWRConfig();
-  const [isContentDirty, setIsContentDirty] = useState(false);
-
-  const handleContentChange = useCallback(
-    (updatedContent: string) => {
-      if (!block) return;
-
-      mutate<Array<Document>>(
-        `/api/document?id=${block.documentId}`,
-        async (currentDocuments) => {
-          if (!currentDocuments) return undefined;
-
-          const currentDocument = currentDocuments.at(-1);
-
-          if (!currentDocument || !currentDocument.content) {
-            setIsContentDirty(false);
-            return currentDocuments;
-          }
-
-          if (currentDocument.content !== updatedContent) {
-            await fetch(`/api/document?id=${block.documentId}`, {
-              method: 'POST',
-              body: JSON.stringify({
-                title: block.title,
-                content: updatedContent,
-                kind: block.kind,
-              }),
-            });
-
-            setIsContentDirty(false);
-
-            const newDocument = {
-              ...currentDocument,
-              content: updatedContent,
-              createdAt: new Date(),
-            };
-
-            return [...currentDocuments, newDocument];
-          }
-          return currentDocuments;
+  // Enhanced Console Output Handling
+  const handleConsoleOutput = useCallback((output: EnhancedConsoleOutput) => {
+    if (output.transactionHash) {
+      const connection = rpcManager.getConnection();
+      connection.onSignature(
+        output.transactionHash,
+        async (signatureResult) => {
+          const txInfo = await connection.getTransaction(output.transactionHash!);
+          setConsoleOutputs(current => {
+            return current.map(item => 
+              item.id === output.id 
+                ? { 
+                    ...item, 
+                    status: 'completed',
+                    content: JSON.stringify(txInfo, null, 2)
+                  }
+                : item
+            );
+          });
         },
-        { revalidate: false },
+        'finalized'
       );
-    },
-    [block, mutate],
-  );
-
-  const debouncedHandleContentChange = useDebounceCallback(
-    handleContentChange,
-    2000,
-  );
-
-  const saveContent = useCallback(
-    (updatedContent: string, debounce: boolean) => {
-      if (document && updatedContent !== document.content) {
-        setIsContentDirty(true);
-
-        if (debounce) {
-          debouncedHandleContentChange(updatedContent);
-        } else {
-          handleContentChange(updatedContent);
-        }
-      }
-    },
-    [document, debouncedHandleContentChange, handleContentChange],
-  );
-
-  function getDocumentContentById(index: number) {
-    if (!documents) return '';
-    if (!documents[index]) return '';
-    return documents[index].content ?? '';
-  }
-
-  const handleVersionChange = (type: 'next' | 'prev' | 'toggle' | 'latest') => {
-    if (!documents) return;
-
-    if (type === 'latest') {
-      setCurrentVersionIndex(documents.length - 1);
-      setMode('edit');
     }
 
-    if (type === 'toggle') {
-      setMode((mode) => (mode === 'edit' ? 'diff' : 'edit'));
-    }
+    setConsoleOutputs(current => [...current, output]);
+  }, [rpcManager]);
 
-    if (type === 'prev') {
-      if (currentVersionIndex > 0) {
-        setCurrentVersionIndex((index) => index - 1);
-      }
-    } else if (type === 'next') {
-      if (currentVersionIndex < documents.length - 1) {
-        setCurrentVersionIndex((index) => index + 1);
-      }
-    }
-  };
-
-  const [isToolbarVisible, setIsToolbarVisible] = useState(false);
-
-  /*
-   * NOTE: if there are no documents, or if
-   * the documents are being fetched, then
-   * we mark it as the current version.
-   */
-
-  const isCurrentVersion =
-    documents && documents.length > 0
-      ? currentVersionIndex === documents.length - 1
-      : true;
-
-  const { width: windowWidth, height: windowHeight } = useWindowSize();
-  const isMobile = windowWidth ? windowWidth < 768 : false;
-
+  // Render with enhanced blockchain features
   return (
     <AnimatePresence>
       {block.isVisible && (
-        <motion.div
-          className="flex flex-row h-dvh w-dvw fixed top-0 left-0 z-50 bg-transparent"
-          initial={{ opacity: 1 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0, transition: { delay: 0.4 } }}
-        >
-          {!isMobile && (
-            <motion.div
-              className="fixed bg-background h-dvh"
-              initial={{
-                width: isSidebarOpen ? windowWidth - 256 : windowWidth,
-                right: 0,
-              }}
-              animate={{ width: windowWidth, right: 0 }}
-              exit={{
-                width: isSidebarOpen ? windowWidth - 256 : windowWidth,
-                right: 0,
-              }}
-            />
-          )}
-
-          {!isMobile && (
-            <motion.div
-              className="relative w-[400px] bg-muted dark:bg-background h-dvh shrink-0"
-              initial={{ opacity: 0, x: 10, scale: 1 }}
-              animate={{
-                opacity: 1,
-                x: 0,
-                scale: 1,
-                transition: {
-                  delay: 0.2,
-                  type: 'spring',
-                  stiffness: 200,
-                  damping: 30,
-                },
-              }}
-              exit={{
-                opacity: 0,
-                x: 0,
-                scale: 1,
-                transition: { duration: 0 },
-              }}
-            >
-              <AnimatePresence>
-                {!isCurrentVersion && (
-                  <motion.div
-                    className="left-0 absolute h-dvh w-[400px] top-0 bg-zinc-900/50 z-50"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                  />
-                )}
-              </AnimatePresence>
-
-              <div className="flex flex-col h-full justify-between items-center gap-4">
-                <BlockMessages
-                  chatId={chatId}
-                  isLoading={isLoading}
-                  votes={votes}
-                  messages={messages}
-                  setMessages={setMessages}
-                  reload={reload}
-                  isReadonly={isReadonly}
-                  blockStatus={block.status}
-                />
-
-                <form className="flex flex-row gap-2 relative items-end w-full px-4 pb-4">
-                  <MultimodalInput
-                    chatId={chatId}
-                    input={input}
-                    setInput={setInput}
-                    handleSubmit={handleSubmit}
-                    isLoading={isLoading}
-                    stop={stop}
-                    attachments={attachments}
-                    setAttachments={setAttachments}
-                    messages={messages}
-                    append={append}
-                    className="bg-background dark:bg-muted"
-                    setMessages={setMessages}
-                  />
-                </form>
-              </div>
-            </motion.div>
-          )}
-
-          <motion.div
-            className="fixed dark:bg-muted bg-background h-dvh flex flex-col overflow-y-scroll border-l dark:border-zinc-700 border-zinc-200"
-            initial={
-              isMobile
-                ? {
-                    opacity: 1,
-                    x: block.boundingBox.left,
-                    y: block.boundingBox.top,
-                    height: block.boundingBox.height,
-                    width: block.boundingBox.width,
-                    borderRadius: 50,
-                  }
-                : {
-                    opacity: 1,
-                    x: block.boundingBox.left,
-                    y: block.boundingBox.top,
-                    height: block.boundingBox.height,
-                    width: block.boundingBox.width,
-                    borderRadius: 50,
-                  }
-            }
-            animate={
-              isMobile
-                ? {
-                    opacity: 1,
-                    x: 0,
-                    y: 0,
-                    height: windowHeight,
-                    width: windowWidth ? windowWidth : 'calc(100dvw)',
-                    borderRadius: 0,
-                    transition: {
-                      delay: 0,
-                      type: 'spring',
-                      stiffness: 200,
-                      damping: 30,
-                      duration: 5000,
-                    },
-                  }
-                : {
-                    opacity: 1,
-                    x: 400,
-                    y: 0,
-                    height: windowHeight,
-                    width: windowWidth
-                      ? windowWidth - 400
-                      : 'calc(100dvw-400px)',
-                    borderRadius: 0,
-                    transition: {
-                      delay: 0,
-                      type: 'spring',
-                      stiffness: 200,
-                      damping: 30,
-                      duration: 5000,
-                    },
-                  }
-            }
-            exit={{
-              opacity: 0,
-              scale: 0.5,
-              transition: {
-                delay: 0.1,
-                type: 'spring',
-                stiffness: 600,
-                damping: 30,
-              },
-            }}
-          >
-            <div className="p-2 flex flex-row justify-between items-start">
-              <div className="flex flex-row gap-4 items-start">
-                <BlockCloseButton />
-
-                <div className="flex flex-col">
-                  <div className="font-medium">
-                    {document?.title ?? block.title}
-                  </div>
-
-                  {isContentDirty ? (
-                    <div className="text-sm text-muted-foreground">
-                      Saving changes...
-                    </div>
-                  ) : document ? (
-                    <div className="text-sm text-muted-foreground">
-                      {`Updated ${formatDistance(
-                        new Date(document.createdAt),
-                        new Date(),
-                        {
-                          addSuffix: true,
-                        },
-                      )}`}
-                    </div>
-                  ) : (
-                    <div className="w-32 h-3 mt-2 bg-muted-foreground/20 rounded-md animate-pulse" />
-                  )}
-                </div>
-              </div>
-
-              <BlockActions
-                block={block}
-                currentVersionIndex={currentVersionIndex}
-                handleVersionChange={handleVersionChange}
-                isCurrentVersion={isCurrentVersion}
-                mode={mode}
-                setConsoleOutputs={setConsoleOutputs}
-              />
-            </div>
-
-            <div
-              className={cn(
-                'dark:bg-muted bg-background h-full overflow-y-scroll !max-w-full pb-40 items-center',
+        <motion.div className="flex flex-row h-dvh w-dvw fixed top-0 left-0 z-50 bg-transparent">
+          <div className="blockchain-status-panel">
+            <div className="network-status">
+              <div className={cn(
+                "status-indicator",
                 {
-                  'py-2 px-2': block.kind === 'code',
-                  'py-8 md:p-20 px-4': block.kind === 'text',
-                },
-              )}
-            >
-              <div
-                className={cn('flex flex-row', {
-                  '': block.kind === 'code',
-                  'mx-auto max-w-[600px]': block.kind === 'text',
-                })}
-              >
-                {isDocumentsFetching && !block.content ? (
-                  <DocumentSkeleton />
-                ) : block.kind === 'code' ? (
-                  <CodeEditor
-                    content={
-                      isCurrentVersion
-                        ? block.content
-                        : getDocumentContentById(currentVersionIndex)
-                    }
-                    isCurrentVersion={isCurrentVersion}
-                    currentVersionIndex={currentVersionIndex}
-                    suggestions={suggestions ?? []}
-                    status={block.status}
-                    saveContent={saveContent}
-                  />
-                ) : block.kind === 'text' ? (
-                  mode === 'edit' ? (
-                    <Editor
-                      content={
-                        isCurrentVersion
-                          ? block.content
-                          : getDocumentContentById(currentVersionIndex)
-                      }
-                      isCurrentVersion={isCurrentVersion}
-                      currentVersionIndex={currentVersionIndex}
-                      status={block.status}
-                      saveContent={saveContent}
-                      suggestions={isCurrentVersion ? (suggestions ?? []) : []}
-                    />
-                  ) : (
-                    <DiffView
-                      oldContent={getDocumentContentById(
-                        currentVersionIndex - 1,
-                      )}
-                      newContent={getDocumentContentById(currentVersionIndex)}
-                    />
-                  )
-                ) : null}
-
-                {suggestions ? (
-                  <div className="md:hidden h-dvh w-12 shrink-0" />
-                ) : null}
-
-                <AnimatePresence>
-                  {isCurrentVersion && (
-                    <Toolbar
-                      isToolbarVisible={isToolbarVisible}
-                      setIsToolbarVisible={setIsToolbarVisible}
-                      append={append}
-                      isLoading={isLoading}
-                      stop={stop}
-                      setMessages={setMessages}
-                      blockKind={block.kind}
-                    />
-                  )}
-                </AnimatePresence>
-              </div>
+                  "bg-green-500": blockchainState.status === 'connected',
+                  "bg-yellow-500": blockchainState.status === 'connecting',
+                  "bg-red-500": blockchainState.status === 'disconnected'
+                }
+              )} />
+              <span className="network-name">{blockchainState.network}</span>
+              <span className="block-info">
+                Block: {blockchainState.latestBlock.toLocaleString()}
+              </span>
             </div>
-
-            <AnimatePresence>
-              {!isCurrentVersion && (
-                <VersionFooter
-                  currentVersionIndex={currentVersionIndex}
-                  documents={documents}
-                  handleVersionChange={handleVersionChange}
-                />
+            
+            <div className="market-analysis">
+              {marketAnalysis && (
+                <div className={cn(
+                  "sentiment-indicator",
+                  {
+                    "text-green-500": marketAnalysis.sentiment === 'bullish',
+                    "text-red-500": marketAnalysis.sentiment === 'bearish',
+                    "text-yellow-500": marketAnalysis.sentiment === 'neutral'
+                  }
+                )}>
+                  {marketAnalysis.sentiment.toUpperCase()} 
+                  ({Math.round(marketAnalysis.confidence * 100)}% confidence)
+                </div>
               )}
-            </AnimatePresence>
+            </div>
+          </div>
 
-            <AnimatePresence>
-              <Console
-                consoleOutputs={consoleOutputs}
-                setConsoleOutputs={setConsoleOutputs}
+          {/* Enhanced Console with Blockchain Data */}
+          <AnimatePresence>
+            <Console
+              consoleOutputs={consoleOutputs}
+              setConsoleOutputs={setConsoleOutputs}
+              tokenMetrics={tokenMetrics}
+              blockchainState={blockchainState}
+              marketAnalysis={marketAnalysis}
+            />
+          </AnimatePresence>
+
+          {/* Transaction Queue Monitor */}
+          <AnimatePresence>
+            {transactionQueue.size() > 0 && (
+              <TransactionQueueMonitor
+                queue={transactionQueue}
+                mevProtection={mevProtection}
               />
-            </AnimatePresence>
-          </motion.div>
+            )}
+          </AnimatePresence>
         </motion.div>
       )}
     </AnimatePresence>
   );
 }
-
-export const Block = memo(PureBlock, (prevProps, nextProps) => {
-  if (prevProps.isLoading !== nextProps.isLoading) return false;
-  if (!equal(prevProps.votes, nextProps.votes)) return false;
-  if (prevProps.input !== nextProps.input) return false;
-  if (!equal(prevProps.messages, nextProps.messages.length)) return false;
-
-  return true;
-});
