@@ -1,5 +1,6 @@
-import { TerminalWindowIcon, LoaderIcon, CrossSmallIcon } from './icons';
+import { TerminalWindowIcon, LoaderIcon, CrossSmallIcon, NetworkIcon } from './icons';
 import { Button } from './ui/button';
+import { Connection, TransactionSignature } from '@solana/web3.js';
 import {
   Dispatch,
   SetStateAction,
@@ -8,19 +9,27 @@ import {
   useRef,
   useState,
 } from 'react';
-import { ConsoleOutput } from './block';
+import { ConsoleOutput, TransactionStatus } from './block';
 import { cn } from '@/lib/utils';
 
 interface ConsoleProps {
   consoleOutputs: Array<ConsoleOutput>;
   setConsoleOutputs: Dispatch<SetStateAction<Array<ConsoleOutput>>>;
+  connection?: Connection;
 }
 
-export function Console({ consoleOutputs, setConsoleOutputs }: ConsoleProps) {
+interface TransactionMonitor {
+  signature: TransactionSignature;
+  status: TransactionStatus;
+  timestamp: number;
+}
+
+export function Console({ consoleOutputs, setConsoleOutputs, connection }: ConsoleProps) {
   const [height, setHeight] = useState<number>(300);
   const [isResizing, setIsResizing] = useState(false);
+  const [transactions, setTransactions] = useState<TransactionMonitor[]>([]);
+  const [networkStatus, setNetworkStatus] = useState<'connected' | 'error' | 'loading'>('loading');
   const consoleEndRef = useRef<HTMLDivElement>(null);
-
   const minHeight = 100;
   const maxHeight = 800;
 
@@ -44,6 +53,81 @@ export function Console({ consoleOutputs, setConsoleOutputs }: ConsoleProps) {
     [isResizing],
   );
 
+  const monitorTransaction = useCallback(async (signature: TransactionSignature) => {
+    if (!connection) return;
+
+    try {
+      setTransactions(prev => [...prev, {
+        signature,
+        status: 'pending',
+        timestamp: Date.now()
+      }]);
+
+      const status = await connection.confirmTransaction(signature);
+      
+      if (status.value.err) {
+        setConsoleOutputs(prev => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            content: `Transaction failed: ${status.value.err.toString()}`,
+            status: 'failed',
+            timestamp: new Date().toISOString()
+          }
+        ]);
+        setTransactions(prev => 
+          prev.map(tx => 
+            tx.signature === signature 
+              ? { ...tx, status: 'error' } 
+              : tx
+          )
+        );
+      } else {
+        setConsoleOutputs(prev => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            content: `Transaction confirmed: ${signature}`,
+            status: 'completed',
+            timestamp: new Date().toISOString()
+          }
+        ]);
+        setTransactions(prev => 
+          prev.map(tx => 
+            tx.signature === signature 
+              ? { ...tx, status: 'confirmed' } 
+              : tx
+          )
+        );
+      }
+    } catch (error) {
+      console.error('Error monitoring transaction:', error);
+      setConsoleOutputs(prev => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          content: `Error monitoring transaction: ${error.message}`,
+          status: 'failed',
+          timestamp: new Date().toISOString()
+        }
+      ]);
+    }
+  }, [connection, setConsoleOutputs]);
+
+  useEffect(() => {
+    if (connection) {
+      const checkConnection = async () => {
+        try {
+          await connection.getVersion();
+          setNetworkStatus('connected');
+        } catch {
+          setNetworkStatus('error');
+        }
+      };
+      checkConnection();
+    }
+  }, [connection]);
+
   useEffect(() => {
     window.addEventListener('mousemove', resize);
     window.addEventListener('mouseup', stopResizing);
@@ -57,6 +141,13 @@ export function Console({ consoleOutputs, setConsoleOutputs }: ConsoleProps) {
     consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [consoleOutputs]);
 
+  const formatTimestamp = (timestamp: string | number) => {
+    if (typeof timestamp === 'number') {
+      return new Date(timestamp).toLocaleTimeString();
+    }
+    return new Date(timestamp).toLocaleTimeString();
+  };
+
   return consoleOutputs.length > 0 ? (
     <>
       <div
@@ -66,7 +157,6 @@ export function Console({ consoleOutputs, setConsoleOutputs }: ConsoleProps) {
         role="slider"
         aria-valuenow={minHeight}
       />
-
       <div
         className={cn(
           'fixed flex flex-col bottom-0 dark:bg-zinc-900 bg-zinc-50 w-full border-t z-40 overflow-y-scroll dark:border-zinc-700 border-zinc-200',
@@ -82,6 +172,14 @@ export function Console({ consoleOutputs, setConsoleOutputs }: ConsoleProps) {
               <TerminalWindowIcon />
             </div>
             <div>Console</div>
+            <div className={cn(
+              "size-2 rounded-full",
+              {
+                "bg-green-500": networkStatus === 'connected',
+                "bg-red-500": networkStatus === 'error',
+                "bg-yellow-500 animate-pulse": networkStatus === 'loading'
+              }
+            )} />
           </div>
           <Button
             variant="ghost"
@@ -92,17 +190,18 @@ export function Console({ consoleOutputs, setConsoleOutputs }: ConsoleProps) {
             <CrossSmallIcon />
           </Button>
         </div>
-
         <div>
           {consoleOutputs.map((consoleOutput, index) => (
             <div
               key={consoleOutput.id}
               className="px-4 py-2 flex flex-row text-sm border-b dark:border-zinc-700 border-zinc-200 dark:bg-zinc-900 bg-zinc-50 font-mono"
             >
+              <div className="w-20 shrink-0 text-muted-foreground">
+                {formatTimestamp(consoleOutput.timestamp)}
+              </div>
               <div
                 className={cn('w-12 shrink-0', {
-                  'text-muted-foreground':
-                    consoleOutput.status === 'in_progress',
+                  'text-muted-foreground': consoleOutput.status === 'in_progress',
                   'text-emerald-500': consoleOutput.status === 'completed',
                   'text-red-400': consoleOutput.status === 'failed',
                 })}
